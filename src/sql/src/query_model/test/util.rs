@@ -55,6 +55,22 @@ pub(crate) mod exp {
         }
     }
 
+    pub(crate) fn mul(lhs: BoxScalarExpr, rhs: BoxScalarExpr) -> BoxScalarExpr {
+        BoxScalarExpr::CallBinary {
+            func: mz_expr::BinaryFunc::MulInt32,
+            expr1: Box::new(lhs),
+            expr2: Box::new(rhs),
+        }
+    }
+
+    pub(crate) fn div(lhs: BoxScalarExpr, rhs: BoxScalarExpr) -> BoxScalarExpr {
+        BoxScalarExpr::CallBinary {
+            func: mz_expr::BinaryFunc::DivInt32,
+            expr1: Box::new(lhs),
+            expr2: Box::new(rhs),
+        }
+    }
+
     pub(crate) fn gt(lhs: BoxScalarExpr, rhs: BoxScalarExpr) -> BoxScalarExpr {
         BoxScalarExpr::CallBinary {
             func: mz_expr::BinaryFunc::Gt,
@@ -138,6 +154,14 @@ pub(crate) mod exp {
             position,
             column_type,
         })
+    }
+
+    pub(crate) mod lit {
+        use super::*;
+
+        pub(crate) fn int32(value: i32) -> BoxScalarExpr {
+            BoxScalarExpr::Literal(Row::pack(&[Datum::Int32(value)]), typ::int32(true))
+        }
     }
 }
 

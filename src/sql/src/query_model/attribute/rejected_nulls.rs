@@ -70,6 +70,10 @@ impl Attribute for RejectedNulls {
             _ => (),
         }
 
+        // TODO: remove this
+        // println!("|box[{}].columns| = {:?}", box_id, r#box.columns.len());
+        // println!("RejectedNulls[{}] = {:?}", box_id, value);
+
         r#box.attributes.set::<RejectedNulls>(value);
     }
 }
