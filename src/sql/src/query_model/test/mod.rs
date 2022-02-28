@@ -112,7 +112,7 @@ fn run_command(
             args.get("format"),
         ))
     } else {
-        match model.as_dot(input) {
+        match model.as_dot(input, catalog, false) {
             Ok(graph) => Ok(graph),
             Err(e) => return Err(format!("graph generation error: {}", e)),
         }

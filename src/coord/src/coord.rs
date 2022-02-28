@@ -3638,17 +3638,17 @@ impl Coordinator {
                 explanation.to_string()
             }
             ExplainStage::QueryGraph => {
-                // TODO add type information to the output graph
                 type Model = Result<mz_sql::query_model::Model, mz_sql::query_model::QGMError>;
-                let model = Model::from(raw_plan)?;
-                model.as_dot("")?
+                let catalog = self.catalog.for_session(session);
+                let mut model = Model::from(raw_plan)?;
+                model.as_dot("", &catalog, options.typed)?
             }
             ExplainStage::OptimizedQueryGraph => {
-                // TODO add type information to the output graph
                 type Model = Result<mz_sql::query_model::Model, mz_sql::query_model::QGMError>;
+                let catalog = self.catalog.for_session(session);
                 let mut model = Model::from(raw_plan)?;
                 model.optimize();
-                model.as_dot("")?
+                model.as_dot("", &catalog, options.typed)?
             }
             ExplainStage::DecorrelatedPlan => {
                 let decorrelated_plan = OptimizedMirRelationExpr::declare_optimized(decorrelate(
