@@ -72,39 +72,43 @@ impl Model {
         self.get_box(box_id)
             .columns
             .iter()
-            .map(|x| self.expr_type(&x.expr))
+            .map(|x| self.expr_type(&x.expr, box_id))
             .collect::<Vec<_>>()
     }
 
     /// Infers a [`ColumnType`] corresponding to the given
-    /// [`BoxScalarExpr`].
+    /// [`BoxScalarExpr`] used within the context of an
+    /// enclosing [`BoxId`].
     ///
     /// *Note*: this method should be used only internally in order
     /// to derive the [`RelationType`] attribute of a [`Model`].
-    fn expr_type(&self, expr: &BoxScalarExpr) -> ColumnType {
+    fn expr_type(&self, expr: &BoxScalarExpr, enclosing_box_id: BoxId) -> ColumnType {
         // TODO: this method should not be recursive
         use BoxScalarExpr::*;
         match expr {
             BaseColumn(c) => c.column_type.clone(),
-            ColumnReference(c) => self.cref_type(c),
+            ColumnReference(c) => self.cref_type(c, enclosing_box_id),
             Literal(_, typ) => typ.clone(),
             CallNullary(func) => func.output_type(),
             CallUnary { expr, func } => {
-                let input_type = self.expr_type(expr);
+                let input_type = self.expr_type(expr, enclosing_box_id);
                 func.output_type(input_type)
             }
             CallBinary { expr1, expr2, func } => {
-                let input1_type = self.expr_type(expr1);
-                let input2_type = self.expr_type(expr2);
+                let input1_type = self.expr_type(expr1, enclosing_box_id);
+                let input2_type = self.expr_type(expr2, enclosing_box_id);
                 func.output_type(input1_type, input2_type)
             }
             CallVariadic { exprs, func } => {
-                let input_types = exprs.iter().map(|e| self.expr_type(e)).collect();
+                let input_types = exprs
+                    .iter()
+                    .map(|e| self.expr_type(e, enclosing_box_id))
+                    .collect();
                 func.output_type(input_types)
             }
             If { then, els, .. } => {
-                let then_type = self.expr_type(then);
-                let else_type = self.expr_type(els);
+                let then_type = self.expr_type(then, enclosing_box_id);
+                let else_type = self.expr_type(els, enclosing_box_id);
                 debug_assert!(then_type.scalar_type.base_eq(&else_type.scalar_type));
                 ColumnType {
                     scalar_type: then_type.scalar_type,
@@ -112,7 +116,7 @@ impl Model {
                 }
             }
             Aggregate { expr, func, .. } => {
-                let input_type = self.expr_type(expr);
+                let input_type = self.expr_type(expr, enclosing_box_id);
                 func.output_type(input_type)
             }
         }
@@ -120,30 +124,39 @@ impl Model {
 
     /// Looks up a [`ColumnType`] corresponding to the given
     /// [`ColumnReference`] from the [`RelationType`] attribute
-    /// of the input box.
+    /// of the input box, assuming the [`ColumnReference`]
+    /// occurs within the context of the enclosing [`BoxId`].
     ///
     /// *Note*: this method should be used only internally in order
     /// to derive the [`RelationType`] attribute of a [`Model`].
-    fn cref_type(&self, cref: &ColumnReference) -> ColumnType {
+    fn cref_type(&self, cref: &ColumnReference, enclosing_box_id: BoxId) -> ColumnType {
         let quantifier = self.get_quantifier(cref.quantifier_id);
 
         let input_box = quantifier.input_box();
         let column_type = &input_box.attributes.get::<RelationType>()[cref.position];
 
-        // nullability is influenced the box context and the RejectedNulls attribute
         let parent_box = self.get_box(quantifier.parent_box);
-        let nullable = match &parent_box.box_type {
-            // the type can be refined to NOT NULL if it is used in a Select
-            // box with a predicate that rejects nulls in that ColumnReference
-            BoxType::Select(..) if select_rejects_nulls(&parent_box, cref) => false,
-            // the type should be widened to NULL if it is used in an OuterJoin
-            // box where the opposite side is preserving
-            BoxType::OuterJoin(..) if outer_join_introduces_nulls(&parent_box, cref) => true,
-            // the type should be widened to NULL if it is used in a Union
-            // box with at least one quantifier in the same position being NULL
-            BoxType::Union if union_introduces_nulls(&parent_box, cref) => true,
-            // otherwise, just inherit the nullable information from the input
-            _ => column_type.nullable.clone(),
+        let nullable = if enclosing_box_id == parent_box.id {
+            // In general, nullability is influenced by the parent box of the quantifier.
+            match &parent_box.box_type {
+                // the type can be refined to NOT NULL if it is used in a Select
+                // box with a predicate that rejects nulls in that ColumnReference
+                BoxType::Select(..) if select_rejects_nulls(&parent_box, cref) => false,
+                // the type should be widened to NULL if it is used in an OuterJoin
+                // box where the opposite side is preserving
+                BoxType::OuterJoin(..) if outer_join_introduces_nulls(&parent_box, cref) => true,
+                // the type should be widened to NULL if it is used in a Union
+                // box with at least one quantifier in the same position being NULL
+                BoxType::Union if union_introduces_nulls(&parent_box, cref) => true,
+                // otherwise, just inherit the nullable information from the input
+                _ => column_type.nullable.clone(),
+            }
+        } else {
+            // If the enclosing box is different from the parent box (which
+            // can happen in a graph derived from a correlated subquery), the
+            // RelationType of the latter might not be fully derived. In this
+            // case, we therefore just inherit the nullability of the input.
+            column_type.nullable.clone()
         };
 
         ColumnType {
