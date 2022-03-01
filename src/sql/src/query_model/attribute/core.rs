@@ -44,6 +44,15 @@ impl Attributes {
         Self(TypeMap::new())
     }
 
+    /// Return `true` iff a value for the attribute `A` is present.
+    #[allow(dead_code)]
+    pub(crate) fn contains<A: 'static + AttributeKey>(&self) -> bool
+    where
+        A::Value: std::fmt::Debug,
+    {
+        self.0.contains_key::<AsKey<A>>()
+    }
+
     /// Return a value for the attribute `A`.
     ///
     /// # Panics
