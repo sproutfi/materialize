@@ -174,4 +174,11 @@ pub(crate) mod typ {
             nullable,
         }
     }
+
+    pub(crate) fn bool(nullable: bool) -> ColumnType {
+        ColumnType {
+            scalar_type: ScalarType::Bool,
+            nullable,
+        }
+    }
 }

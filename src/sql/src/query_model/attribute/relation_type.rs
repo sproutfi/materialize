@@ -24,7 +24,7 @@
 //! [`RejectedNulls`] as follows: If a [`ColumnReference`]
 //! cannot be null if the enclosing box rejects nulls for it.
 
-use mz_repr::ColumnType;
+use mz_repr::{ColumnType, ScalarType};
 
 use crate::query_model::attribute::core::{Attribute, AttributeKey};
 use crate::query_model::attribute::rejected_nulls::RejectedNulls;
@@ -132,24 +132,41 @@ impl Model {
     fn cref_type(&self, cref: &ColumnReference, enclosing_box_id: BoxId) -> ColumnType {
         let quantifier = self.get_quantifier(cref.quantifier_id);
 
+        // the type of All and Existential quantifiers is always BOOLEAN NOT NULL
+        if matches!(
+            quantifier.quantifier_type,
+            QuantifierType::Existential | QuantifierType::All
+        ) {
+            return ColumnType {
+                scalar_type: ScalarType::Bool,
+                nullable: false,
+            };
+        }
+
         let input_box = quantifier.input_box();
         let column_type = &input_box.attributes.get::<RelationType>()[cref.position];
 
         let parent_box = self.get_box(quantifier.parent_box);
         let nullable = if enclosing_box_id == parent_box.id {
-            // In general, nullability is influenced by the parent box of the quantifier.
-            match &parent_box.box_type {
-                // the type can be refined to NOT NULL if it is used in a Select
-                // box with a predicate that rejects nulls in that ColumnReference
-                BoxType::Select(..) if select_rejects_nulls(&parent_box, cref) => false,
-                // the type should be widened to NULL if it is used in an OuterJoin
-                // box where the opposite side is preserving
-                BoxType::OuterJoin(..) if outer_join_introduces_nulls(&parent_box, cref) => true,
-                // the type should be widened to NULL if it is used in a Union
-                // box with at least one quantifier in the same position being NULL
-                BoxType::Union if union_introduces_nulls(&parent_box, cref) => true,
-                // otherwise, just inherit the nullable information from the input
-                _ => column_type.nullable.clone(),
+            if quantifier.quantifier_type == QuantifierType::Scalar {
+                // scalar quantifiers can always be NULL if the subquery is empty
+                true
+            } else {
+                use BoxType::*;
+                // In general, nullability is influenced by the parent box of the quantifier.
+                match &parent_box.box_type {
+                    // the type can be refined to NOT NULL if it is used in a Select
+                    // box with a predicate that rejects nulls in that ColumnReference
+                    Select(..) if select_rejects_nulls(&parent_box, cref) => false,
+                    // the type should be widened to NULL if it is used in an OuterJoin
+                    // box where the opposite side is preserving
+                    OuterJoin(..) if outer_join_introduces_nulls(&parent_box, cref) => true,
+                    // the type should be widened to NULL if it is used in a Union
+                    // box with at least one quantifier in the same position being NULL
+                    Union if union_introduces_nulls(&parent_box, cref) => true,
+                    // otherwise, just inherit the nullable information from the input
+                    _ => column_type.nullable.clone(),
+                }
             }
         } else {
             // If the enclosing box is different from the parent box (which
@@ -366,6 +383,106 @@ mod tests {
                 typ::int32(true),
                 typ::int32(true),
                 typ::int32(true),
+            ];
+
+            assert_eq!(act_value, exp_value);
+        }
+    }
+
+    #[test]
+    fn test_exists_subquery() {
+        let mut model = Model::new();
+
+        let g_ids = (0..=1)
+            .map(|id| {
+                let g_id = model.make_box(qgm::get(id).into());
+                let mut b = model.get_mut_box(g_id);
+                b.add_column(exp::base(0, typ::int32(true)));
+                g_id
+            })
+            .collect::<Vec<_>>();
+
+        let s_id = model.make_box(Select::default().into());
+        let q_ids = vec![
+            model.make_quantifier(QuantifierType::Foreach, g_ids[0], s_id),
+            model.make_quantifier(QuantifierType::Existential, g_ids[1], s_id),
+        ];
+        {
+            let mut b = model.get_mut_box(s_id);
+            // C0: Q0.0
+            b.add_column(exp::cref(q_ids[0], 0));
+            // C0: Q1.0
+            b.add_column(exp::cref(q_ids[1], 0));
+        }
+
+        // derive Get box (#i)
+        for g_id in g_ids {
+            RejectedNulls.derive(&mut model, g_id);
+            RelationType.derive(&mut model, g_id);
+        }
+        // derive Select box (#1)
+        RejectedNulls.derive(&mut model, s_id);
+        RelationType.derive(&mut model, s_id);
+
+        {
+            let b = model.get_box(s_id);
+
+            let act_value = b.attributes.get::<RelationType>();
+            let exp_value = &vec![typ::int32(true), typ::bool(false)];
+
+            assert_eq!(act_value, exp_value);
+        }
+    }
+
+    #[test]
+    fn test_scalar_subquery() {
+        let mut model = Model::new();
+
+        let g_ids = (0..=1)
+            .map(|id| {
+                let g_id = model.make_box(qgm::get(id).into());
+                let mut b = model.get_mut_box(g_id);
+                b.add_column(exp::base(0, typ::int32(false)));
+                b.add_column(exp::base(0, typ::bool(false)));
+                g_id
+            })
+            .collect::<Vec<_>>();
+
+        let s_id = model.make_box(Select::default().into());
+        let q_ids = vec![
+            model.make_quantifier(QuantifierType::Foreach, g_ids[0], s_id),
+            model.make_quantifier(QuantifierType::Scalar, g_ids[1], s_id),
+        ];
+        {
+            let mut b = model.get_mut_box(s_id);
+            // C0: Q0.0
+            b.add_column(exp::cref(q_ids[0], 0));
+            // C0: Q0.1
+            b.add_column(exp::cref(q_ids[0], 1));
+            // C0: Q1.0
+            b.add_column(exp::cref(q_ids[1], 0));
+            // C0: Q1.1
+            b.add_column(exp::cref(q_ids[1], 1));
+        }
+
+        // derive Get box (#i)
+        for g_id in g_ids {
+            RejectedNulls.derive(&mut model, g_id);
+            RelationType.derive(&mut model, g_id);
+        }
+        // derive Select box (#1)
+        RejectedNulls.derive(&mut model, s_id);
+        RelationType.derive(&mut model, s_id);
+
+        {
+            let b = model.get_box(s_id);
+
+            let act_value = b.attributes.get::<RelationType>();
+            let exp_value = &vec![
+                typ::int32(false),
+                typ::bool(false),
+                typ::int32(true),
+                typ::bool(true),
             ];
 
             assert_eq!(act_value, exp_value);
