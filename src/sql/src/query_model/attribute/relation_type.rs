@@ -155,15 +155,24 @@ impl Model {
                 use BoxType::*;
                 // In general, nullability is influenced by the parent box of the quantifier.
                 match &parent_box.box_type {
-                    // the type can be refined to NOT NULL if it is used in a Select
-                    // box with a predicate that rejects nulls in that ColumnReference
+                    // The type can be restricted to NOT NULL if it is used in a Select
+                    // box with a predicate that rejects nulls in that ColumnReference.
                     Select(..) if select_rejects_nulls(&parent_box, cref) => false,
-                    // the type should be widened to NULL if it is used in an OuterJoin
-                    // box where the opposite side is preserving
+                    // The type should be widened to NULL if it is used in an OuterJoin
+                    // box where the opposite side is preserving.
                     OuterJoin(..) if outer_join_introduces_nulls(&parent_box, cref) => true,
-                    // the type should be widened to NULL if it is used in a Union
-                    // box with at least one quantifier in the same position being NULL
+                    // The type of aggregates in grouping boxes without keys (a.k.a.
+                    // global aggregates) can always be NULL. This works correctly only
+                    // under the assumption that the output columns of a Grouping box
+                    // are always trivial ColumnReference expressions.
+                    Grouping(grouping) if grouping.key.is_empty() => true,
+                    // The type should be widened to NULL if it is used in a Union
+                    // box with at least one quantifier in the same position being NULL.
                     Union if union_introduces_nulls(&parent_box, cref) => true,
+                    // The type should be restricted to NOT NULL if it is used in an
+                    // Intersect box with at least one quantifier in the same position
+                    // being NOT NULL.
+                    Intersect if intersect_rejects_nulls(&parent_box, cref) => false,
                     // otherwise, just inherit the nullable information from the input
                     _ => column_type.nullable.clone(),
                 }
@@ -184,7 +193,7 @@ impl Model {
 }
 
 /// A [`ColumnReference`] rejects nulls if:
-/// 1. the enclosing box is of [`BoxType::Select`] (asserted), and
+/// 1. the enclosing box is of type [`BoxType::Select`] (asserted), and
 /// 2. the [`RejectedNulls`] attribute rejects nulls in the [`ColumnReference`].
 #[inline]
 fn select_rejects_nulls(r#box: &BoundRef<'_, QueryBox>, cref: &ColumnReference) -> bool {
@@ -193,7 +202,7 @@ fn select_rejects_nulls(r#box: &BoundRef<'_, QueryBox>, cref: &ColumnReference) 
 }
 
 /// A quantifier referenced the given [`ColumnReference`] introduces nulls if:
-/// 1. the enclosing box is of [`BoxType::OuterJoin`] (asserted), and
+/// 1. the enclosing box is of type [`BoxType::OuterJoin`] (asserted), and
 /// 2. the other quantifier is preserving.
 #[inline]
 fn outer_join_introduces_nulls(r#box: &BoundRef<'_, QueryBox>, cref: &ColumnReference) -> bool {
@@ -205,7 +214,7 @@ fn outer_join_introduces_nulls(r#box: &BoundRef<'_, QueryBox>, cref: &ColumnRefe
 }
 
 /// A quantifier referenced the given [`ColumnReference`] introduces nulls if:
-/// 1. the enclosing box is of [`BoxType::Union`] (asserted), and
+/// 1. the enclosing box is of type [`BoxType::Union`] (asserted), and
 /// 2. at least one of the input quantifiers for the given position is nullable.
 #[inline]
 fn union_introduces_nulls(r#box: &BoundRef<'_, QueryBox>, cref: &ColumnReference) -> bool {
@@ -213,6 +222,17 @@ fn union_introduces_nulls(r#box: &BoundRef<'_, QueryBox>, cref: &ColumnReference
     r#box
         .input_quantifiers()
         .any(|q| q.input_box().attributes.get::<RelationType>()[cref.position].nullable)
+}
+
+/// A quantifier referenced the given [`ColumnReference`] introduces nulls if:
+/// 1. the enclosing box is of type [`BoxType::Intersect`] (asserted), and
+/// 2. at least one of the input quantifiers for the given position is not nullable.
+#[inline]
+fn intersect_rejects_nulls(r#box: &BoundRef<'_, QueryBox>, cref: &ColumnReference) -> bool {
+    debug_assert!(matches!(r#box.box_type, BoxType::Intersect));
+    r#box
+        .input_quantifiers()
+        .any(|q| !q.input_box().attributes.get::<RelationType>()[cref.position].nullable)
 }
 
 #[cfg(test)]
